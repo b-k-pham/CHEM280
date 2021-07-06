@@ -1,0 +1,521 @@
+---
+title: "CHEM 280 ASD Project"
+author: "Benjamin Pham"
+date: "3/9/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library('GEOquery')
+library('tidyverse')
+library('lumi')
+library('DESeq2')
+```
+
+
+#Data Processing
+
+```{r}
+filename <- 'GSE64018_countlevel_12asd_12ctl.txt'
+rawcounts <- as.data.frame(read.table(filename,sep='\t'))
+coldata <- data.frame(colnames(rawcounts))
+rawcounts
+
+```
+
+
+```{r}
+colnames(rawcounts)
+condition <- factor(c(rep('ASD',12),rep('Ctrl',12)),levels = c('Ctrl','ASD'))
+
+dds <- DESeq(DESeqDataSetFromMatrix(rawcounts, DataFrame(condition), ~condition))
+deg<- results(dds)
+deg
+```
+
+
+
+
+
+
+```{r}
+
+#library(org.Hs.eg.db)
+
+library(AnnotationHub)
+
+```
+
+```{r}
+ah = AnnotationHub()
+
+ah
+
+```
+
+
+```{r}
+
+orgs <- subset(ah, ah$rdataclass == "OrgDb")
+orgdb <- query(orgs, "Homo sapiens")[[1]]
+
+orgdb
+```
+
+```{r}
+results.BP <- data.frame(results)
+cols <- c("SYMBOL", "GENENAME")
+ensids <- rownames(results)
+annot_df <- AnnotationDbi::select(org.Hs.eg.db, keys=ensids, columns=cols, keytype="ENSEMBL")
+
+results.BP$ENSEMBL <- rownames(results.BP)
+rownames(results) <- NULL
+
+annot_df
+
+
+```
+
+```{r}
+rawcounts
+```
+
+
+## Co-expression Group clustering
+
+```{r}
+library('WGCNA')
+```
+
+
+```{r}
+
+dds_norm <- DESeq2::vst(dds)
+```
+
+
+```{r}
+#normalized_counts <- assay(dds_norm) %>%
+#t()
+
+normalized_counts <- assay(dds_norm)
+head(normalized_counts)
+```
+
+```{r}
+
+library('gplots')
+library('cluster') 
+library('factoextra')
+
+Col <- colorRampPalette(c('blue','white','red'))
+
+heatmap.2(normalized_counts,trace='none',scale='row',col = Col, hclustfun = function(x) hclust(x,method = 'complete'), cexCol = 1, cexRow = 0.1, distfun = function(x) dist(x,'euclidean'),margins = c(10,10))
+```
+
+
+
+```{r}
+normalized_counts_t <- t(normalized_counts)
+dim(t(normalized_counts))
+
+gsg <- goodSamplesGenes(normalized_counts_t,verbose = 0)
+
+```
+
+```{r}
+
+good = normalized_counts_t[gsg$goodSamples, gsg$goodGenes]
+dim(good)
+```
+
+
+```{r}
+deg_good = deg[gsg$goodGenes,]
+
+deg_good
+```
+
+```{r}
+results <- subset(deg_good, abs(log2FoldChange) > 1 & (padj<0.05))
+results
+dim(results)
+```
+
+```{r}
+df_results <- data.frame(results)
+df_results$ENSEMBL = rownames(df_results)
+
+df_results <- merge(df_results,annot_df, by = 'ENSEMBL')
+
+de_genes <- drop_na(df_results)
+head(de_genes)
+dim(de_genes)
+```
+
+
+```{r}
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+sft = pickSoftThreshold(good, powerVector = powers, verbose = 1)
+```
+
+```{r}
+
+bwnet <- blockwiseModules(good,
+  maxBlockSize = 5000, # What size chunks (how many genes) the calculations should be run in
+  TOMType = "signed", # topological overlap matrix
+  power = 4, # soft threshold for network construction
+  numericLabels = TRUE, # Let's use numbers instead of colors for module labels
+  randomSeed = 1234,
+  deepSplit = 2,
+  mergeCutHeight = 0.25,
+  verbose = 1# there's some randomness associated with this calculation
+  # so we should set a seed
+)
+```
+
+```{r}
+bwnet[8]
+```
+
+
+
+
+
+```{r}
+traits <- data.frame(colnames(rawcounts),condition)
+colnames(traits)[1] <- 'sample'
+traits <- traits %>% mutate(condition = ifelse(condition == 'ASD',1,0))# 1 = ASD, 0 = Ctrl
+rownames(traits) = traits$sample
+traits <- traits['condition']
+
+traits
+
+```
+
+```{r}
+nGenes = ncol(good)
+nSamples = nrow(good)
+bwModuleColors = labels2colors(bwnet$colors)
+MEs0 = moduleEigengenes(good, bwModuleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs,traits, use = "p")
+#chooseTopHubInEachModule(good,bwModuleColors)
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+signif(moduleTraitPvalue, 1), ")", sep = "");
+
+
+labeledHeatmap(Matrix = moduleTraitCor,
+xLabels = names(traits),
+yLabels = names(MEs),
+ySymbols = names(MEs),
+colorLabels = FALSE,
+colors = blueWhiteRed(50),
+textMatrix = NULL,
+setStdMargins = FALSE,
+cex.text = 0.5,
+zlim = c(-1,1),
+main = paste("Module-trait relationships"))
+```
+
+```{r}
+modNames = substring(names(MEs), 3)
+
+cond = as.data.frame(traits$condition)
+names(cond) = 'condition'
+
+
+
+geneModuleMembership = as.data.frame(cor(good, MEs, use = "p"))
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+
+
+geneTraitSignificance = as.data.frame(cor(good, cond, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(cond), sep="")
+names(GSPvalue) = paste("p.GS.", names(cond), sep="")
+```
+
+```{r}
+module_asd_cor <- data.frame(moduleTraitCor,moduleTraitPvalue)
+module_asd_cor_order <- module_asd_cor %>% arrange(condition)
+module_asd_cor_order
+```
+
+```{r}
+GSPvalue
+```
+
+```{r}
+MMPvalue
+```
+
+
+```{r}
+module = "tan"
+column = match(module, modNames);
+moduleGenes = bwModuleColors==module;
+sizeGrWindow(7, 7);
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+abs(geneTraitSignificance[moduleGenes, 1]),
+xlab = paste("Module Membership in", module, "module"),
+ylab = "Gene significance for condition",
+main = paste("Module membership vs. gene significance\n"),
+cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+```
+
+```{r}
+module = "purple"
+column = match(module, modNames);
+moduleGenes = bwModuleColors==module;
+sizeGrWindow(7, 7);
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+abs(geneTraitSignificance[moduleGenes, 1]),
+xlab = paste("Module Membership in", module, "module"),
+ylab = "Gene significance for disease_status",
+main = paste("Module membership vs. gene significance\n"),
+cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+abline(v=0.8,h=0.6, col = 'red')
+```
+
+```{r}
+module = "darkmagenta"
+column = match(module, modNames);
+moduleGenes = bwModuleColors==module;
+sizeGrWindow(7, 7);
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+abs(geneTraitSignificance[moduleGenes, 1]),
+xlab = paste("Module Membership in", module, "module"),
+ylab = "Gene significance for disease_status",
+main = paste("Module membership vs. gene significance\n"),
+cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+```
+
+
+```{r}
+module_interest <- c('tan','purple','darkmagenta')
+
+#names()[bwModuleColors==module_interest[1]]
+
+
+m1 <- colnames(good)[bwModuleColors == module_interest[1]]
+m2 <- colnames(good)[bwModuleColors == module_interest[2]]
+m3 <- colnames(good)[bwModuleColors == module_interest[3]]
+length(m1)
+length(m2)
+length(m3)
+
+
+```
+
+```{r}
+mod_int_ct <- data.frame(table(bwModuleColors)) %>% filter(bwModuleColors %in% module_interest)
+
+m <- t(as.matrix(mod_int_ct))
+colnames(m) = m[1,]
+
+m <- m[2,]
+
+m
+```
+```{r}
+
+df_clusters <- data.frame(table(bwModuleColors))
+
+colors <- df_clusters$bwModuleColors
+
+df_clusters <- df_clusters %>% mutate(color_fill = ifelse(bwModuleColors %in% module_interest,as.character(bwModuleColors),'grey50'))
+
+df_clusters
+
+p<-ggplot(data=df_clusters, aes(x=bwModuleColors, y=Freq, fill = color_fill)) + geom_bar(stat="identity") +scale_fill_manual(values=c('darkmagenta','grey50','purple','tan')) + xlab('Clusters') + ylab('Number of Co-Expressed Genes')
+
+p
+```
+
+```{r}
+df_clusters %>% filter(color_fill != 'grey50')
+```
+
+## BEST HUB GENE
+```{r}
+best_hub_gene <- chooseTopHubInEachModule(good, bwModuleColors)[module_interest]
+```
+
+```{r}
+length(table(bwModuleColors))
+```
+```{r}
+
+```
+
+
+```{r}
+m1_g <- data.frame(m1)
+m1_g_annot <- annot_df  %>% filter(ENSEMBL %in% m1_g$m1)
+#m1_g %>% filter((m1 %in% annot_df$ENSEMBL))
+
+
+m2_g <- data.frame(m2)
+m2_g_annot <- annot_df  %>% filter(ENSEMBL %in% m2_g$m2)
+
+m3_g <- data.frame(m3)
+m3_g_annot <- annot_df  %>% filter(ENSEMBL %in% m3_g$m3)
+
+m1_annot <- rbind(data.frame(Count = nrow(m1_g) - nrow(m1_g_annot),Cluster = 'tan'),data.frame(Count = nrow(m1_g_annot),Cluster = 'tan'))
+m2_annot <- rbind(data.frame(Count = nrow(m2_g) - nrow(m2_g_annot),Cluster = 'purple'),data.frame(Count = nrow(m2_g_annot),Cluster = 'purple'))
+m3_annot <- rbind(data.frame(Count = nrow(m3_g) - nrow(m3_g_annot),Cluster = 'darkmagenta'),data.frame(Count = nrow(m3_g_annot),Cluster = 'darkmagenta'))
+
+
+m_annot <- rbind(m1_annot,m2_annot,m3_annot)
+m_annot$Status <- factor(c('Not Annotated','Annotated','Not Annotated','Annotated','Not Annotated','Annotated'))
+
+m_annot
+p<-ggplot(data=m_annot, aes(x=Cluster, y=Count, fill = Status)) + geom_bar(stat="identity")  + xlab('Clusters') + ylab('Number of Co-Expressed Genes')
+p
+
+```
+
+Dark Magenta is not important anymore... Focus on the other 2 clusters Purple(2) and Tan (1)
+
+
+```{r}
+
+plotMA(deg)
+abline(h = c(-1,1),col = 'red')
+```
+
+```{r}
+df_results
+```
+
+
+```{r}
+df_purple <- df_results %>% filter(SYMBOL %in% m2_g_annot$SYMBOL)
+
+df_purple_de <- drop_na(df_purple)
+
+df_purple_de
+```
+
+```{r}
+df_tan <- df_results %>% filter(SYMBOL %in% m1_g_annot$SYMBOL)
+
+df_tan_de <- drop_na(df_tan)
+
+df_tan_de
+```
+
+
+```{r}
+best_hub_gene <- data.frame(best_hub_gene)
+best_hub_gene_annot <- annot_df %>% filter(ENSEMBL %in% best_hub_gene$best_hub_gene)
+
+knitr::kable(best_hub_gene_annot, "pipe")
+
+best_hub_gene
+```
+
+
+```{r}
+
+p<-ggplot(data=m_annot, aes(x=rownames(m_annot), y=Total, fill = Annotated)) + geom_bar(position="stack",stat="identity")
+
+p
+```
+
+
+
+```{r}
+GSPvalue
+```
+
+```{r}
+module = "purple"
+column = match(module, modNames);
+moduleGenes = bwModuleColors==module;
+#sizeGrWindow(7, 7);
+#par(mfrow = c(1,1));
+#verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+#abs(geneTraitSignificance[moduleGenes, 1]))
+
+#which(moduleGenes[abs(geneModuleMembership[moduleGenes, column]) > 0.8 & abs(geneTraitSignificance[moduleGenes, 1]) > 0.6])
+
+#bwModuleColors[47]
+
+
+
+#moduleGenes[intersect(set1,set2)]
+
+#geneModuleMembership[moduleGenes, column]
+
+#which(moduleGenes == TRUE)
+
+#geneModuleMembership[356,17]
+
+gmm_purp <- geneModuleMembership %>% dplyr::select(MMpurple) %>% filter(MMpurple > 0.8)
+
+gts <- geneTraitSignificance %>%  filter(GS.condition > 0.6)
+
+set1 <- rownames(gmm_purp)
+
+set2 <- rownames(gts)
+
+purp_high <- data.frame(intersect(set1,set2))
+
+purp_high_annot <- drop_na(annot_df %>% filter(ENSEMBL %in% purp_high[,1]))
+
+intersect(purp_high_annot$SYMBOL,df_purple_de$SYMBOL)
+```
+
+
+```{r}
+df_tan_de %>% filter(SYMBOL == 'MSN')
+```
+
+
+```{r}
+df_purple_hub_candidate <- df_purple_de %>% filter(SYMBOL %in% intersect(purp_high_annot$SYMBOL,df_purple_de$SYMBOL))
+
+knitr::kable(df_purple_hub_candidate, "pipe")
+
+```
+
+
+```{r}
+
+tan_de_log2FC <- (df_tan_de %>% dplyr::select(SYMBOL, log2FoldChange))
+
+
+
+ggplot(data=tan_de_log2FC, aes(x=SYMBOL, y=log2FoldChange)) + geom_bar(stat="identity",  fill = 'tan')
+```
+
+```{r}
+
+purple_de_log2FC <- (df_purple_de %>% dplyr::select(SYMBOL, log2FoldChange))
+
+
+
+ggplot(data=purple_de_log2FC, aes(x=SYMBOL, y=log2FoldChange)) + geom_bar(stat="identity",  fill = 'purple')
+```
+
+```{r}
+
+write.table(df_tan_de,sep='\t',file = 'tan_cluster_ASD_DE.txt',row.names = FALSE)
+```
+
+```{r}
+
+write.table(df_purple_de,sep='\t',file = 'purple_cluster_ASD_DE.txt',row.names = FALSE)
+```
+
+
+

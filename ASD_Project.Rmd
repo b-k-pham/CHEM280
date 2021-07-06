@@ -1,0 +1,107 @@
+---
+title: "CHEM 280 ASD Project"
+author: "Benjamin Pham"
+date: "3/9/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library('GEOquery')
+library('tidyverse')
+library('lumi')
+```
+
+
+#Data Processing
+
+Start with GSE38322:
+
+
+```{r}
+accession <- 'GSE38322'
+gset <- getGEO(accession, GSEMatrix = TRUE)
+show(gset)
+```
+```{r}
+gset <- getGEO(accession, GSEMatrix = FALSE)
+
+```
+
+```{r}
+Meta(gset)$sample_id
+```
+
+```{r}
+library('rvest')
+link <- 'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM938964'
+page <- read_html(link)
+```
+
+```{r}
+id_retrieve <- function(GSM){
+  link <- 'https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc='
+  link_final <- (paste(link,GSM,sep = ''))
+  page <- read_html(link_final)
+  body <- page %>% html_node('body') %>% xml2::xml_find_all('//td [contains(@style, "text-align: justify")]') %>% rvest::html_text()
+  id <- body[2]
+  return(id)
+}
+
+id_retrieve('GSM938964')
+```
+
+```{r}
+meta_new <- c()
+meta <- Meta(gset)$sample_id
+for (z in 1:length(meta)){
+  meta_new[z] <- id_retrieve(meta[z])
+}
+meta_new
+```
+
+
+```{r}
+string <- meta_new[1]
+
+substr(string,12,nchar(string))
+```
+
+```{r}
+str.rfind <- function(s, char) { rev(grep(char, unlist(strsplit(s, NULL)), fixed=T))[1]}
+meta_final <- c()
+for (z in 1:length(meta_new)){
+  last <- str.rfind(meta_new[z],'_')
+  format_sample <- substr(meta_new[z],last + 1,nchar(meta_new[z]))
+  meta_final[z] <- format_sample
+}
+
+meta_final
+
+```
+
+```{r}
+sample_id_map <- data.frame(meta,meta_final)
+colnames(sample_id_map) <- c('gsm_id','Sample.ID')
+sample_id_map
+```
+
+```{r}
+Cerebellum <- read.table('Cerebellum_Condition.txt',sep='\t',header = 1)
+head(Cerebellum)
+```
+
+```{r}
+Cere.accession <- Cerebellum %>% filter(Date.Set == accession)
+Cere.accession.BP <- merge(Cere.accession,sample_id_map, by = 'Sample.ID')
+Cere.accession.BP <- Cere.accession.BP %>% select(Date.Set,gsm_id,Gender,Brain.Region,Disease.Status, Preservation)
+Cere.accession.BP$Disease.Status = factor(Cere.accession.BP$Disease.Status,levels = c('autism','control'))
+Cere.accession.BP %>% filter(Disease.Status == 'autism')
+Cere.accession.BP %>% filter(Disease.Status == 'control')
+```
+
+This pipeline associates gsm_id with sample id from the paper supplementary...
+Now the fun part: DE expression
+
+# GSE38322
+
+
